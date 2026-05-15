@@ -1,0 +1,1364 @@
+<!--
+================================================================================
+  ARM CTRL v0.1 — Natural Language Robot Arm Controller
+================================================================================
+  What it does:
+    Type a plain-English command ("reach forward half a meter at chest height")
+    and the robot arm moves to that position. Powered by Gemini AI for natural
+    language parsing and geometric inverse kinematics for motion planning.
+
+  IK Math (3-DOF geometric):
+    Robot has 3 revolute joints: base spin (Z), shoulder pitch (Y), elbow pitch (Y)
+    Link lengths: L1=0.4m, L2=0.35m, L3=0.25m (total reach: 1.0m)
+    IK solves analytically: planar reach via cosine rule on L2+L3, then base angle.
+    Same workspace and link geometry as the original Pinocchio-based CLIK solver.
+
+  How to run:
+    1. Open index.html in any modern browser (no server needed)
+    2. Paste your Gemini API key (get one free at aistudio.google.com)
+    3. Type a target description or click a preset
+    4. Watch the arm solve and animate
+================================================================================
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ARM CTRL v0.1</title>
+<style>
+  /* ── Reset & Base ─────────────────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #080808;
+    --surface:  #0f0f0f;
+    --border:   #1e1e1e;
+    --border2:  #2a2a2a;
+    --text:     #c8c8c8;
+    --muted:    #484848;
+    --green:    #00ff88;
+    --green-dim:#00cc6a;
+    --red:      #ff4455;
+    --yellow:   #ffcc00;
+    --font:     'Courier New', 'Lucida Console', monospace;
+  }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 13px;
+    line-height: 1.5;
+    overflow: hidden;
+  }
+
+  /* ── Layout ───────────────────────────────────────────────────────────── */
+  .app {
+    display: grid;
+    grid-template-rows: 38px 1fr;
+    height: 100vh;
+  }
+
+  /* ── Top Bar ──────────────────────────────────────────────────────────── */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+
+  .topbar-left {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .logo {
+    font-size: 11px;
+    font-weight: bold;
+    letter-spacing: 0.2em;
+    color: var(--green);
+  }
+
+  .build-tag {
+    font-size: 10px;
+    color: var(--muted);
+    letter-spacing: 0.1em;
+  }
+
+  .status-pill {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    color: var(--muted);
+  }
+
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    background: var(--muted);
+    border-radius: 50%;
+    transition: background 0.3s;
+  }
+
+  .status-dot.online {
+    background: var(--green);
+    animation: pulse-dot 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  /* ── Main Content ─────────────────────────────────────────────────────── */
+  .main {
+    display: grid;
+    grid-template-columns: 1fr 340px;
+    overflow: hidden;
+  }
+
+  /* ── Canvas Panel ─────────────────────────────────────────────────────── */
+  .canvas-panel {
+    position: relative;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  #armCanvas {
+    display: block;
+  }
+
+  .canvas-label {
+    position: absolute;
+    bottom: 12px;
+    left: 12px;
+    font-size: 10px;
+    color: var(--muted);
+    letter-spacing: 0.1em;
+  }
+
+  .view-label {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    font-size: 10px;
+    color: var(--muted);
+    letter-spacing: 0.15em;
+  }
+
+  /* ── Control Panel ────────────────────────────────────────────────────── */
+  .control-panel {
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    background: var(--bg);
+  }
+
+  .panel-section {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .section-label {
+    font-size: 9px;
+    letter-spacing: 0.2em;
+    color: var(--muted);
+    margin-bottom: 10px;
+    text-transform: uppercase;
+  }
+
+  /* ── API Key ──────────────────────────────────────────────────────────── */
+  .key-input-wrap {
+    display: flex;
+    gap: 6px;
+  }
+
+  .key-input {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border2);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 11px;
+    padding: 6px 8px;
+    outline: none;
+    transition: border-color 0.2s;
+    min-width: 0;
+  }
+
+  .key-input:focus {
+    border-color: var(--green);
+  }
+
+  .key-input::placeholder {
+    color: var(--muted);
+  }
+
+  .btn {
+    background: transparent;
+    border: 1px solid var(--border2);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    padding: 6px 10px;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+    user-select: none;
+  }
+
+  .btn:hover:not(:disabled) {
+    background: var(--green);
+    color: var(--bg);
+    border-color: var(--green);
+  }
+
+  .btn:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+
+  .btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .btn.primary {
+    border-color: var(--green);
+    color: var(--green);
+  }
+
+  .btn.primary:hover:not(:disabled) {
+    background: var(--green);
+    color: var(--bg);
+  }
+
+  /* ── Command Input ────────────────────────────────────────────────────── */
+  .cmd-textarea {
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border2);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 12px;
+    padding: 8px;
+    outline: none;
+    resize: none;
+    height: 64px;
+    transition: border-color 0.2s;
+    caret-color: var(--green);
+  }
+
+  .cmd-textarea:focus {
+    border-color: var(--green);
+  }
+
+  .cmd-textarea::placeholder {
+    color: var(--muted);
+  }
+
+  .cmd-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+  }
+
+  .btn-execute {
+    flex: 1;
+    padding: 8px;
+    font-size: 11px;
+    letter-spacing: 0.15em;
+    border-color: var(--green);
+    color: var(--green);
+  }
+
+  /* ── Presets ──────────────────────────────────────────────────────────── */
+  .presets {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 5px;
+  }
+
+  .preset-btn {
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    padding: 7px 6px;
+    text-align: center;
+  }
+
+  /* ── Terminal Readout ─────────────────────────────────────────────────── */
+  .readout {
+    font-size: 12px;
+    line-height: 2;
+  }
+
+  .readout-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .readout-key {
+    color: var(--muted);
+    font-size: 11px;
+  }
+
+  .readout-val {
+    color: var(--text);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    min-width: 70px;
+    text-align: right;
+  }
+
+  .readout-val.green { color: var(--green); }
+  .readout-val.yellow { color: var(--yellow); }
+  .readout-val.red { color: var(--red); }
+
+  /* ── Status Log ───────────────────────────────────────────────────────── */
+  .status-log {
+    font-size: 11px;
+    line-height: 1.8;
+    min-height: 60px;
+  }
+
+  .log-line {
+    display: flex;
+    gap: 6px;
+  }
+
+  .log-prefix {
+    color: var(--green);
+    flex-shrink: 0;
+  }
+
+  .log-text {
+    color: var(--text);
+    word-break: break-all;
+  }
+
+  .log-text.muted { color: var(--muted); }
+  .log-text.error { color: var(--red); }
+  .log-text.warn  { color: var(--yellow); }
+  .log-text.ok    { color: var(--green); }
+
+  /* ── Scrollbar ────────────────────────────────────────────────────────── */
+  .control-panel::-webkit-scrollbar { width: 4px; }
+  .control-panel::-webkit-scrollbar-track { background: var(--bg); }
+  .control-panel::-webkit-scrollbar-thumb { background: var(--border2); }
+
+  /* ── Blinking cursor ──────────────────────────────────────────────────── */
+  .blink {
+    animation: blink 1s step-end infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- TOP BAR -->
+  <div class="topbar">
+    <div class="topbar-left">
+      <span class="logo">ARM CTRL</span>
+      <span class="build-tag">v0.1 / 3-DOF / GEOMETRIC IK</span>
+    </div>
+    <div class="status-pill">
+      <div class="status-dot" id="onlineDot"></div>
+      <span id="onlineLabel">OFFLINE</span>
+    </div>
+  </div>
+
+  <!-- MAIN -->
+  <div class="main">
+
+    <!-- CANVAS -->
+    <div class="canvas-panel">
+      <span class="view-label">SIDE VIEW — XZ PLANE</span>
+      <canvas id="armCanvas"></canvas>
+      <span class="canvas-label">BASE ORIGIN ◆ WORKSPACE RADIUS 1.0m</span>
+
+      <!-- TOP-DOWN MINI VIEW -->
+      <div style="position: absolute; bottom: 36px; right: 12px; display: flex; flex-direction: column; align-items: flex-end;">
+        <button id="heatmapBtn" onclick="toggleHeatmap()" 
+          style="font-size:9px; font-family:'Courier New',monospace; background:transparent; 
+                 border:1px solid #2a2a2a; color:#484848; padding:3px 6px; cursor:pointer; 
+                 margin-bottom:4px; letter-spacing:0.1em; width:100%;">
+          REACHABILITY: OFF
+        </button>
+        <span style="font-size: 9px; color: #484848; letter-spacing: 0.1em; margin-bottom: 4px; font-family: 'Courier New', monospace;">TOP VIEW — XY</span>
+        <canvas id="topViewCanvas" width="200" height="200" style="border: 1px solid #1e1e1e; background: #0a0a0a;"></canvas>
+      </div>
+    </div>
+
+    <!-- CONTROL PANEL -->
+    <div class="control-panel">
+
+      <!-- API KEY -->
+      <div class="panel-section">
+        <div class="section-label">GEMINI API KEY</div>
+        <div class="key-input-wrap">
+          <input type="password" class="key-input" id="apiKey"
+            placeholder="paste key from aistudio.google.com" autocomplete="off">
+          <button class="btn" onclick="toggleKeyVisibility()">SHOW</button>
+        </div>
+      </div>
+
+      <!-- VOICE INPUT -->
+      <div class="panel-section">
+        <div class="section-label">VOICE INPUT</div>
+        <button id="voiceBtn" class="btn primary" style="width:100%; padding:10px; font-size:11px; letter-spacing:0.15em;">[ ◉ HOLD TO SPEAK ]</button>
+        <div id="voiceStatus" style="font-size:10px; color:var(--muted); margin-top:6px; min-height:14px; letter-spacing:0.08em;"></div>
+      </div>
+
+      <!-- COMMAND -->
+      <div class="panel-section">
+        <div class="section-label">NATURAL LANGUAGE COMMAND</div>
+        <textarea class="cmd-textarea" id="cmdInput"
+          placeholder="describe a target position...&#10;e.g. reach forward half a meter at waist height"
+          onkeydown="handleCmdKey(event)"></textarea>
+        <div class="cmd-actions">
+          <button class="btn btn-execute primary" onclick="executeCommand()">EXECUTE</button>
+          <button class="btn" onclick="clearLog()">CLEAR</button>
+        </div>
+      </div>
+
+      <!-- PRESETS -->
+      <div class="panel-section">
+        <div class="section-label">QUICK TARGETS</div>
+        <div class="presets">
+          <button class="btn preset-btn" onclick="moveArmTo(0.6,0.0,0.3)">[ FORWARD ]</button>
+          <button class="btn preset-btn" onclick="moveArmTo(0.0,0.0,0.85)">[ VERTICAL ]</button>
+          <button class="btn preset-btn" onclick="moveArmTo(0.2,0.55,0.3)">[ LATERAL ]</button>
+          <button class="btn preset-btn" onclick="moveArmTo(0.3,0.2,0.6)">[ DIAGONAL ]</button>
+        </div>
+      </div>
+
+      <!-- TRAJECTORY MODE -->
+      <div class="panel-section">
+        <div class="section-label" id="queueLabel">COMMAND QUEUE (0 steps)</div>
+        <textarea class="cmd-textarea" id="trajInput" style="height:40px;"
+          placeholder="add a step... e.g. reach up high"></textarea>
+        <div class="cmd-actions">
+          <button class="btn btn-execute primary" id="addStepBtn" onclick="addStep()">ADD STEP</button>
+        </div>
+        <div id="queueList" style="margin-top:10px; background:var(--surface); border:1px solid var(--border2); height:80px; overflow-y:auto; padding:5px; font-size:10px; color:var(--muted); font-family:var(--font);">
+          <!-- queue items here -->
+        </div>
+        <div class="cmd-actions" style="margin-top:6px;">
+          <button class="btn" id="runSeqBtn" style="flex:1" onclick="runSequence()">RUN SEQUENCE</button>
+          <button class="btn" id="clearQueueBtn" style="flex:1" onclick="clearQueue()">CLEAR QUEUE</button>
+        </div>
+      </div>
+
+      <!-- JOINT READOUT -->
+      <div class="panel-section">
+        <div class="section-label">JOINT STATE</div>
+        <div class="readout">
+          <div class="readout-row">
+            <span class="readout-key">&gt; Q1  BASE</span>
+            <span class="readout-val" id="rQ1">+000.0°</span>
+          </div>
+          <div class="readout-row">
+            <span class="readout-key">&gt; Q2  SHOULDER</span>
+            <span class="readout-val" id="rQ2">+000.0°</span>
+          </div>
+          <div class="readout-row">
+            <span class="readout-key">&gt; Q3  ELBOW</span>
+            <span class="readout-val" id="rQ3">+000.0°</span>
+          </div>
+          <div class="readout-row" style="margin-top:6px; border-top:1px solid var(--border); padding-top:6px;">
+            <span class="readout-key">&gt; EE  X</span>
+            <span class="readout-val green" id="rX">+0.000m</span>
+          </div>
+          <div class="readout-row">
+            <span class="readout-key">&gt; EE  Y</span>
+            <span class="readout-val green" id="rY">+0.000m</span>
+          </div>
+          <div class="readout-row">
+            <span class="readout-key">&gt; EE  Z</span>
+            <span class="readout-val green" id="rZ">+0.000m</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- STATUS LOG -->
+      <div class="panel-section" style="flex:1; border-bottom:none;">
+        <div class="section-label">STATUS LOG</div>
+        <div class="status-log" id="statusLog">
+          <div class="log-line">
+            <span class="log-prefix">&gt;</span>
+            <span class="log-text muted">system ready<span class="blink">_</span></span>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /control-panel -->
+  </div><!-- /main -->
+</div><!-- /app -->
+
+<script>
+// ============================================================
+//  ROBOT KINEMATICS
+//  Link lengths from original repo: L1=0.4m, L2=0.35m, L3=0.25m
+//  Joint axes: q1=Z (base spin), q2=Y (shoulder), q3=Y (elbow)
+// ============================================================
+
+const L1 = 0.4, L2 = 0.35, L3 = 0.25;
+const WORKSPACE_R = 1.0;
+
+function forwardKinematics(q1, q2, q3) {
+  const reach = L1 * Math.cos(q2)
+               + L2 * Math.cos(q2 + q3)
+               + L3 * Math.cos(q2 + q3); 
+
+  const z = L1 * Math.sin(q2)
+           + L2 * Math.sin(q2 + q3)
+           + L3 * Math.sin(q2 + q3 + 0); 
+
+  const x = reach * Math.cos(q1);
+  const y = reach * Math.sin(q1);
+
+  return { x, y, z };
+}
+
+function inverseKinematics(tx, ty, tz) {
+  const dist = Math.sqrt(tx*tx + ty*ty + tz*tz);
+  if (dist > WORKSPACE_R * 0.98) return { error: "TOO FAR" };
+  if (tz < 0) return { error: "BELOW FLOOR" };
+
+  const q1 = Math.atan2(ty, tx);
+  const r = Math.sqrt(tx*tx + ty*ty);
+  const z = tz;
+  const L_arm = L2 + L3; 
+  const D = Math.sqrt(r*r + z*z);
+
+  if (D > L1 + L_arm) return { error: "TOO FAR" };
+  if (D < Math.abs(L1 - L_arm)) return { error: "UNREACHABLE GEOMETRY" };
+
+  const cosQ2 = (D*D + L1*L1 - L_arm*L_arm) / (2 * D * L1);
+  if (Math.abs(cosQ2) > 1) return { error: "UNREACHABLE GEOMETRY" };
+
+  const alpha = Math.atan2(z, r);
+  const beta  = Math.acos(Math.max(-1, Math.min(1, cosQ2)));
+  const q2    = alpha + beta; 
+
+  const cosQ3 = (L1*L1 + L_arm*L_arm - D*D) / (2 * L1 * L_arm);
+  if (Math.abs(cosQ3) > 1) return { error: "UNREACHABLE GEOMETRY" };
+  const q3 = -(Math.PI - Math.acos(Math.max(-1, Math.min(1, cosQ3))));
+
+  if (isNaN(q1) || isNaN(q2) || isNaN(q3)) return { error: "UNREACHABLE GEOMETRY" };
+
+  return { q1, q2, q3 };
+}
+
+// ============================================================
+//  ANIMATION STATE
+// ============================================================
+
+let currentQ  = { q1: 0, q2: 0.6, q3: -1.0 };
+let targetQ   = { q1: 0, q2: 0.6, q3: -1.0 };
+let animStart = null;
+const ANIM_DURATION = 900; // ms
+let isMoving  = false;
+let failedTarget = null; 
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function easeInOut(t) {
+  return t < 0.5 ? 2*t*t : -1 + (4 - 2*t)*t;
+}
+
+function setJointAngles(q1, q2, q3) {
+  targetQ = { q1, q2, q3 };
+  animStart = null;
+  isMoving = true;
+  setStatus('SOLVING...', 'warn');
+}
+
+function moveArmTo(x, y, z) {
+  const ik = inverseKinematics(x, y, z);
+  if (ik.error) {
+    failedTarget = { x, y, z, reason: ik.error }; 
+    setStatus('OUT OF WORKSPACE — ' + ik.error, 'error');
+    log(`target (${fmt(x)}, ${fmt(y)}, ${fmt(z)}) unreachable — ${ik.error}`, 'error');
+    return false;
+  }
+  failedTarget = null; 
+  setJointAngles(ik.q1, ik.q2, ik.q3);
+  log(`target → x:${fmt(x)} y:${fmt(y)} z:${fmt(z)}`, 'ok');
+  return true;
+}
+
+// ============================================================
+//  CANVAS DRAWING
+// ============================================================
+
+const canvas = document.getElementById('armCanvas');
+const ctx    = canvas.getContext('2d');
+
+const topCanvas = document.getElementById('topViewCanvas'); 
+const topCtx = topCanvas.getContext('2d');
+const TOP_SCALE = 78; 
+
+let CX, CY, SCALE;
+
+function resizeCanvas() {
+  const panel = canvas.parentElement;
+  const W = panel.clientWidth;
+  const H = panel.clientHeight;
+  canvas.width  = W;
+  canvas.height = H;
+  CX    = W / 2;
+  CY    = H * 0.82;
+  SCALE = Math.min(W, H) * 0.38;
+  
+  // Rebuild heatmaps if enabled
+  if (heatmapEnabled) {
+    buildHeatmapCache();
+    buildHeatmapCacheSide();
+  }
+}
+
+function toScreen(mx, mz) {
+  return {
+    sx: CX + mx * SCALE,
+    sy: CY - mz * SCALE
+  };
+}
+
+function drawGrid() {
+  ctx.strokeStyle = '#161616';
+  ctx.lineWidth = 1;
+  const step = SCALE * 0.2;
+
+  for (let x = CX % step; x < canvas.width; x += step) {
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
+  }
+  for (let y = CY % step; y < canvas.height; y += step) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
+  }
+
+  ctx.strokeStyle = '#252525';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 8]);
+  ctx.beginPath();
+  ctx.moveTo(0, CY);
+  ctx.lineTo(canvas.width, CY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.strokeStyle = '#2a2a2a';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(CX - 10, CY); ctx.lineTo(CX + 10, CY); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(CX, CY - 10); ctx.lineTo(CX, CY + 10); ctx.stroke();
+}
+
+function drawWorkspaceMeter() {
+  ctx.strokeStyle = '#1a1a1a';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([2, 6]);
+  ctx.beginPath();
+  ctx.arc(CX, CY, SCALE * WORKSPACE_R, 0, Math.PI, true);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function drawArm(q) {
+  const base = { x: 0, z: 0 };
+  const s1x = L1 * Math.cos(q.q2);
+  const s1z = L1 * Math.sin(q.q2);
+  const s2x = s1x + L2 * Math.cos(q.q2 + q.q3);
+  const s2z = s1z + L2 * Math.sin(q.q2 + q.q3);
+  const eex = s2x + L3 * Math.cos(q.q2 + q.q3);
+  const eez = s2z + L3 * Math.sin(q.q2 + q.q3);
+
+  const p0 = toScreen(base.x, base.z);
+  const p1 = toScreen(s1x, s1z);
+  const p2 = toScreen(s2x, s2z);
+  const p3 = toScreen(eex, eez);
+
+  const points = [p0, p1, p2, p3];
+  const colors = ['#3a6aff', '#00ccaa', '#c8c8c8'];
+  const darkColors = ['#1a3a8a', '#008a7a', '#8a8a8a']; 
+  const thicknesses = [3, 2.5, 2];
+
+  for (let i = 0; i < 3; i++) {
+    ctx.strokeStyle = darkColors[i];
+    ctx.lineWidth = thicknesses[i] + 2;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(points[i].sx, points[i].sy);
+    ctx.lineTo(points[i+1].sx, points[i+1].sy);
+    ctx.stroke();
+
+    ctx.strokeStyle = colors[i];
+    ctx.lineWidth = thicknesses[i];
+    ctx.beginPath();
+    ctx.moveTo(points[i].sx, points[i].sy);
+    ctx.lineTo(points[i+1].sx, points[i+1].sy);
+    ctx.stroke();
+  }
+
+  const jointRadii = [7, 6, 5];
+  const innerRadii = [4, 3.5, 3];
+  for (let i = 0; i < 3; i++) {
+    const p = points[i];
+    ctx.fillStyle = colors[i];
+    ctx.beginPath();
+    ctx.arc(p.sx, p.sy, jointRadii[i], 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#0a0a0a';
+    ctx.beginPath();
+    ctx.arc(p.sx, p.sy, innerRadii[i], 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.fillStyle = '#3a6aff';
+  ctx.fillRect(p0.sx - 12, p0.sy, 24, 4); 
+  ctx.fillStyle = '#1a2a5a';
+  ctx.fillRect(p0.sx - 14, p0.sy + 4, 28, 3);
+  ctx.fillStyle = '#0f1f4f';
+  ctx.fillRect(p0.sx - 16, p0.sy + 7, 32, 2);
+
+  const t = Date.now() / 1000;
+  const pulse = 0.5 + 0.5 * Math.sin(t * 2.5);
+  
+  ctx.shadowColor = '#00ff88';
+  ctx.shadowBlur = 12 + pulse * 8;
+  ctx.strokeStyle = '#00ff88';
+  ctx.lineWidth = 1.5;
+  
+  const angle = Math.atan2(p3.sy - p2.sy, p3.sx - p2.sx);
+  const perpX = Math.cos(angle + Math.PI/2);
+  const perpY = Math.sin(angle + Math.PI/2);
+  
+  ctx.beginPath();
+  ctx.moveTo(p3.sx - perpX * 4, p3.sy - perpY * 4);
+  ctx.lineTo(p3.sx + perpX * 4, p3.sy + perpY * 4);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(p3.sx, p3.sy);
+  ctx.lineTo(p3.sx + Math.cos(angle) * 4, p3.sy + Math.sin(angle) * 4);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  ctx.fillStyle = '#00cc66';
+  ctx.font = '9px Courier New';
+  ctx.fillText('EE', p3.sx + 10, p3.sy + 4);
+
+  return { eex, eez };
+}
+
+function drawTopView() {
+  topCtx.clearRect(0, 0, topCanvas.width, topCanvas.height);
+  const cx = topCanvas.width / 2, cy = topCanvas.height / 2; 
+  
+  if (heatmapEnabled && heatmapCache) {
+    topCtx.putImageData(heatmapCache, 0, 0);
+  }
+
+  topCtx.strokeStyle = '#161616';
+  topCtx.lineWidth = 1;
+  const step = TOP_SCALE * 0.2;
+  for (let x = cx % step; x < topCanvas.width; x += step) {
+    topCtx.beginPath(); topCtx.moveTo(x, 0); topCtx.lineTo(x, topCanvas.height); topCtx.stroke();
+  }
+  for (let y = cy % step; y < topCanvas.height; y += step) {
+    topCtx.beginPath(); topCtx.moveTo(0, y); topCtx.lineTo(topCanvas.width, y); topCtx.stroke();
+  }
+  
+  topCtx.strokeStyle = '#1a1a1a';
+  topCtx.lineWidth = 1;
+  topCtx.setLineDash([3, 5]);
+  topCtx.beginPath();
+  topCtx.arc(cx, cy, TOP_SCALE * WORKSPACE_R, 0, Math.PI * 2);
+  topCtx.stroke();
+  topCtx.setLineDash([]);
+  
+  const fk = forwardKinematics(currentQ.q1, currentQ.q2, currentQ.q3);
+  const sx = cx + fk.x * TOP_SCALE;
+  const sy = cy - fk.y * TOP_SCALE;
+  
+  topCtx.fillStyle = '#3a6aff';
+  topCtx.fillRect(cx - 2.5, cy - 2.5, 5, 5);
+  
+  topCtx.strokeStyle = '#3a6aff';
+  topCtx.lineWidth = 1.5;
+  topCtx.beginPath();
+  topCtx.moveTo(cx, cy);
+  topCtx.lineTo(sx, sy);
+  topCtx.stroke();
+  
+  topCtx.shadowColor = '#00ff88';
+  topCtx.shadowBlur = 8;
+  topCtx.fillStyle = '#00ff88';
+  topCtx.fillRect(sx - 2, sy - 2, 4, 4);
+  topCtx.shadowBlur = 0;
+  
+  if (failedTarget) {
+    const fsx = cx + failedTarget.x * TOP_SCALE;
+    const fsy = cy - failedTarget.y * TOP_SCALE;
+    topCtx.strokeStyle = '#ff4455';
+    topCtx.lineWidth = 2;
+    topCtx.beginPath();
+    topCtx.moveTo(fsx - 4, fsy - 4);
+    topCtx.lineTo(fsx + 4, fsy + 4);
+    topCtx.stroke();
+    topCtx.beginPath();
+    topCtx.moveTo(fsx + 4, fsy - 4);
+    topCtx.lineTo(fsx - 4, fsy + 4);
+    topCtx.stroke();
+  }
+}
+
+// ── REACHABILITY HEATMAP ──────────────────────────────────────────────────────
+let heatmapEnabled = false;
+let heatmapCache = null; 
+let heatmapCacheSide = null; // sideview cache
+
+function toggleHeatmap() {
+  heatmapEnabled = !heatmapEnabled;
+  const btn = document.getElementById('heatmapBtn');
+  if (heatmapEnabled) {
+    btn.textContent = 'REACHABILITY: ON';
+    btn.style.borderColor = '#00ff88';
+    btn.style.color = '#00ff88';
+    buildHeatmapCache();
+    buildHeatmapCacheSide();
+  } else {
+    btn.textContent = 'REACHABILITY: OFF';
+    btn.style.borderColor = '#2a2a2a';
+    btn.style.color = '#484848';
+    heatmapCache = null;
+    heatmapCacheSide = null;
+  }
+}
+
+function buildHeatmapCache() {
+  const W = topCanvas.width, H = topCanvas.height;
+  const cx = W/2, cy = H/2;
+  const scale = TOP_SCALE;
+  
+  const imageData = topCtx.createImageData(W, H);
+  const data = imageData.data;
+  
+  for (let py = 0; py < H; py++) {
+    for (let px = 0; px < W; px++) {
+      const worldX = (px - cx) / scale;
+      const worldY = -(py - cy) / scale;
+      const worldZ = 0.3; 
+      
+      const dist = Math.sqrt(worldX*worldX + worldY*worldY + worldZ*worldZ);
+      const ik = inverseKinematics(worldX, worldY, worldZ);
+      
+      const idx = (py * W + px) * 4;
+      
+      if (!ik.error) {
+        const margin = 1 - (dist / WORKSPACE_R);
+        if (margin > 0.3) {
+          data[idx]   = 0;
+          data[idx+1] = 80;
+          data[idx+2] = 40;
+          data[idx+3] = 60; 
+        } else {
+          data[idx]   = 80;
+          data[idx+1] = 70;
+          data[idx+2] = 0;
+          data[idx+3] = 60;
+        }
+      } else {
+        if (dist < WORKSPACE_R * 1.2) {
+          data[idx]   = 80;
+          data[idx+1] = 10;
+          data[idx+2] = 15;
+          data[idx+3] = 40;
+        }
+      }
+    }
+  }
+  heatmapCache = imageData;
+}
+
+function buildHeatmapCacheSide() {
+  const W = canvas.width, H = canvas.height;
+  const imageData = ctx.createImageData(W, H);
+  const data = imageData.data;
+  
+  // To speed up, we only sample the workspace region
+  // and we sample at a lower resolution then fill 4x4 blocks
+  const step = 4; 
+  
+  for (let py = 0; py < H; py += step) {
+    for (let px = 0; px < W; px += step) {
+      // Screen to world
+      const worldReach = (px - CX) / SCALE;
+      const worldZ = (CY - py) / SCALE;
+      
+      if (worldReach < -0.1) continue; // Only positive reach in sideview
+      
+      const dist = Math.sqrt(worldReach*worldReach + worldZ*worldZ);
+      // Sample planar IK (y=0)
+      const ik = inverseKinematics(worldReach, 0, worldZ);
+      
+      let r=0, g=0, b=0, a=0;
+      
+      if (!ik.error) {
+        const margin = 1 - (dist / WORKSPACE_R);
+        if (margin > 0.3) {
+          r=0; g=80; b=40; a=60;
+        } else {
+          r=80; g=70; b=0; a=60;
+        }
+      } else if (dist < WORKSPACE_R * 1.2) {
+        r=80; g=10; b=15; a=40;
+      }
+      
+      if (a > 0) {
+        for (let iy=0; iy<step && py+iy < H; iy++) {
+          for (let ix=0; ix<step && px+ix < W; ix++) {
+            const idx = ((py+iy) * W + (px+ix)) * 4;
+            data[idx] = r; data[idx+1] = g; data[idx+2] = b; data[idx+3] = a;
+          }
+        }
+      }
+    }
+  }
+  heatmapCacheSide = imageData;
+}
+
+// ============================================================
+//  MAIN RENDER LOOP
+// ============================================================
+
+function render(timestamp) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#0a0a0a';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  if (heatmapEnabled && heatmapCacheSide) {
+    ctx.putImageData(heatmapCacheSide, 0, 0);
+  }
+
+  drawGrid();
+  drawWorkspaceMeter();
+
+  if (isMoving) {
+    if (!animStart) animStart = timestamp;
+    const elapsed = timestamp - animStart;
+    const t = Math.min(elapsed / ANIM_DURATION, 1);
+    const et = easeInOut(t);
+
+    currentQ.q1 = lerp(currentQ.q1, targetQ.q1, et);
+    currentQ.q2 = lerp(currentQ.q2, targetQ.q2, et);
+    currentQ.q3 = lerp(currentQ.q3, targetQ.q3, et);
+
+    if (t >= 1) {
+      currentQ = { ...targetQ };
+      isMoving = false;
+      setStatus('TARGET REACHED', 'ok');
+      onMoveComplete(); 
+    }
+  }
+
+  drawArm(currentQ);
+  drawTopView(); 
+
+  if (failedTarget) {
+    const reach = Math.sqrt(failedTarget.x * failedTarget.x + failedTarget.y * failedTarget.y);
+    const sp = toScreen(reach, failedTarget.z);
+    
+    ctx.fillStyle = '#ff4455';
+    ctx.beginPath();
+    ctx.arc(sp.sx, sp.sy, 6, 0, Math.PI * 2);
+    ctx.fill();
+    
+    ctx.fillStyle = '#ff4455';
+    ctx.font = '10px Courier New';
+    ctx.fillText('✕ ' + failedTarget.reason, sp.sx + 10, sp.sy + 4);
+    
+    ctx.strokeStyle = '#ff4455';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 5]);
+    ctx.beginPath();
+    ctx.arc(CX, CY, SCALE * WORKSPACE_R, 0, Math.PI, true);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  updateReadout();
+  requestAnimationFrame(render);
+}
+
+function updateReadout() {
+  const toDeg = r => {
+    const d = r * 180 / Math.PI;
+    return (d >= 0 ? '+' : '') + d.toFixed(1) + '°';
+  };
+
+  document.getElementById('rQ1').textContent = toDeg(currentQ.q1);
+  document.getElementById('rQ2').textContent = toDeg(currentQ.q2);
+  document.getElementById('rQ3').textContent = toDeg(currentQ.q3);
+
+  const fk = forwardKinematics(currentQ.q1, currentQ.q2, currentQ.q3);
+  const fm = v => (v >= 0 ? '+' : '') + v.toFixed(3) + 'm';
+  document.getElementById('rX').textContent = fm(fk.x);
+  document.getElementById('rY').textContent = fm(fk.y);
+  document.getElementById('rZ').textContent = fm(fk.z);
+}
+
+// ============================================================
+//  AI API (GEMINI)
+// ============================================================
+
+const SYSTEM_PROMPT = `You are a robot arm controller interface.
+The robot arm has 3 joints and a reach of exactly 1.0 meter total.
+Coordinate system: x = forward, y = sideways/lateral, z = up/height.
+Valid workspace: sphere of radius 1.0m centered at origin, z >= 0.
+
+Extract the target x, y, z position in meters from the user's natural language command.
+Use common sense for human descriptions:
+- "waist height" ≈ z:0.3, "chest height" ≈ z:0.6, "overhead" ≈ z:0.85
+- "forward" means positive x, "to the right" means positive y
+- "half a meter" = 0.5m, "fully extended" ≈ 0.9m reach
+
+Respond ONLY with valid JSON (no markdown, no explanation):
+{"x": number, "y": number, "z": number}
+
+If the command is unclear or impossible, respond with:
+{"error": "brief reason"}`;
+
+async function callAI(userText) {
+  const apiKey = document.getElementById('apiKey').value.trim();
+  if (!apiKey) {
+    setStatus('NO API KEY', 'error');
+    log('paste your Gemini API key above', 'error');
+    return null;
+  }
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+  const body = {
+    system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    contents: [{ role: 'user', parts: [{ text: userText }] }]
+  };
+
+  setStatus('CALLING AI...', 'warn');
+  log(`parsing: "${userText.slice(0, 50)}${userText.length > 50 ? '…' : ''}"`, 'muted');
+
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      const msg = err?.error?.message || `HTTP ${resp.status}`;
+      setStatus('API ERROR', 'error');
+      log(msg, 'error');
+      return null;
+    }
+
+    const data = await resp.json();
+    const raw  = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    const clean = raw.replace(/```json|```/gi, '').trim();
+
+    try {
+      return JSON.parse(clean);
+    } catch {
+      setStatus('PARSE ERROR', 'error');
+      log(`bad response: ${raw.slice(0, 60)}`, 'error');
+      return null;
+    }
+
+  } catch (e) {
+    setStatus('NETWORK ERROR', 'error');
+    log('check API key and connection', 'error');
+    return null;
+  }
+}
+
+async function executeCommand() {
+  const text = document.getElementById('cmdInput').value.trim();
+  if (!text) return;
+
+  const result = await callAI(text);
+  if (!result) return;
+
+  if (result.error) {
+    setStatus('COMMAND UNCLEAR', 'warn');
+    log(result.error, 'warn');
+    return;
+  }
+
+  const { x, y, z } = result;
+  if (typeof x !== 'number' || typeof y !== 'number' || typeof z !== 'number') {
+    setStatus('INVALID COORDS', 'error');
+    log('AI returned non-numeric coordinates', 'error');
+    return;
+  }
+
+  log(`AI → x:${fmt(x)} y:${fmt(y)} z:${fmt(z)}`, 'muted');
+  moveArmTo(x, y, z);
+}
+
+function handleCmdKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    executeCommand();
+  }
+}
+
+// ============================================================
+//  TRAJECTORY QUEUE LOGIC
+// ============================================================
+
+let queue = [];
+let isExecutingQueue = false;
+let currentQueueIndex = 0;
+
+async function addStep() {
+  const text = document.getElementById('trajInput').value.trim();
+  if (!text) return;
+  
+  const result = await callAI(text);
+  if (result && !result.error) {
+    queue.push({ x: result.x, y: result.y, z: result.z });
+    renderQueue();
+    document.getElementById('trajInput').value = '';
+  } else if (result && result.error) {
+    log(result.error, 'warn');
+  }
+}
+
+function renderQueue() {
+  const list = document.getElementById('queueList');
+  const label = document.getElementById('queueLabel');
+  label.textContent = `COMMAND QUEUE (${queue.length} steps)`;
+  list.innerHTML = queue.map((step, i) => `<div style="margin-bottom:2px;">${i+1}. x:${fmt(step.x)} y:${fmt(step.y)} z:${fmt(step.z)}</div>`).join('');
+}
+
+function clearQueue() {
+  queue = [];
+  renderQueue();
+}
+
+async function runSequence() {
+  if (queue.length === 0) return;
+  isExecutingQueue = true;
+  currentQueueIndex = 0;
+  
+  document.getElementById('addStepBtn').disabled = true;
+  document.getElementById('runSeqBtn').disabled = true;
+  
+  executeNextQueueStep();
+}
+
+function executeNextQueueStep() {
+  if (currentQueueIndex >= queue.length) {
+    isExecutingQueue = false;
+    document.getElementById('addStepBtn').disabled = false;
+    document.getElementById('runSeqBtn').disabled = false;
+    log('SEQUENCE COMPLETE', 'ok');
+    return;
+  }
+  
+  const step = queue[currentQueueIndex];
+  log(`STEP ${currentQueueIndex + 1}/${queue.length} → x:${fmt(step.x)} y:${fmt(step.y)} z:${fmt(step.z)}`, 'ok');
+  
+  const success = moveArmTo(step.x, step.y, step.z);
+  if (!success) {
+    setTimeout(() => {
+      currentQueueIndex++;
+      executeNextQueueStep();
+    }, 300);
+  }
+}
+
+function onMoveComplete() {
+  if (isExecutingQueue) {
+    setTimeout(() => {
+      currentQueueIndex++;
+      executeNextQueueStep();
+    }, 300);
+  }
+}
+
+// ============================================================
+//  UI HELPERS
+// ============================================================
+
+let currentStatus = 'READY';
+
+function setStatus(text, type = 'ok') {
+  currentStatus = text;
+}
+
+function log(text, type = 'ok') {
+  const log = document.getElementById('statusLog');
+  const line = document.createElement('div');
+  line.className = 'log-line';
+  line.innerHTML = `<span class="log-prefix">&gt;</span><span class="log-text ${type}">${text}</span>`;
+  log.appendChild(line);
+  while (log.children.length > 8) log.removeChild(log.firstChild);
+  log.scrollTop = log.scrollHeight;
+
+  const dot = document.getElementById('onlineDot');
+  const label = document.getElementById('onlineLabel');
+  if (type === 'error') {
+    dot.style.background = '#ff4455';
+    dot.classList.remove('online');
+    label.textContent = currentStatus;
+    label.style.color = '#ff4455';
+  } else if (type === 'warn') {
+    dot.style.background = '#ffcc00';
+    dot.classList.remove('online');
+    label.textContent = currentStatus;
+    label.style.color = '#ffcc00';
+  } else {
+    dot.classList.add('online');
+    dot.style.background = '';
+    label.textContent = currentStatus;
+    label.style.color = '';
+  }
+}
+
+function clearLog() {
+  const l = document.getElementById('statusLog');
+  l.innerHTML = '<div class="log-line"><span class="log-prefix">&gt;</span><span class="log-text muted">log cleared<span class="blink">_</span></span></div>';
+}
+
+function toggleKeyVisibility() {
+  const inp = document.getElementById('apiKey');
+  inp.type = inp.type === 'password' ? 'text' : 'password';
+}
+
+document.getElementById('apiKey').addEventListener('input', function() {
+  const dot   = document.getElementById('onlineDot');
+  const label = document.getElementById('onlineLabel');
+  if (this.value.trim().length > 10) {
+    dot.classList.add('online');
+    dot.style.background = '';
+    label.textContent = 'ONLINE';
+    label.style.color = '';
+    log('API key set', 'ok');
+    setStatus('READY', 'ok');
+  } else {
+    dot.classList.remove('online');
+    dot.style.background = 'var(--muted)';
+    label.textContent = 'OFFLINE';
+    label.style.color = 'var(--muted)';
+  }
+});
+
+function fmt(n) { return n.toFixed(2); }
+
+// ── VOICE INPUT ──────────────────────────────────────────────────────────────
+const voiceBtn = document.getElementById('voiceBtn');
+const voiceStatus = document.getElementById('voiceStatus');
+
+let recognition = null;
+let isRecording = false;
+
+function initVoice() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    voiceBtn.textContent = '[ ✕ NOT SUPPORTED ]';
+    voiceBtn.disabled = true;
+    voiceStatus.textContent = 'use Chrome for voice input';
+    return;
+  }
+  recognition = new SR();
+  recognition.continuous = false;
+  recognition.interimResults = true;
+  recognition.lang = 'en-US';
+
+  recognition.onstart = () => {
+    isRecording = true;
+    voiceBtn.textContent = '[ ● LISTENING... ]';
+    voiceBtn.style.borderColor = '#ff4455';
+    voiceBtn.style.color = '#ff4455';
+    voiceStatus.textContent = 'speak now...';
+    voiceStatus.style.color = 'var(--yellow)';
+  };
+
+  recognition.onresult = (event) => {
+    const transcript = Array.from(event.results)
+      .map(r => r[0].transcript).join('');
+    voiceStatus.textContent = transcript;
+    if (event.results[event.results.length - 1].isFinal) {
+      document.getElementById('cmdInput').value = transcript;
+      voiceStatus.style.color = 'var(--green)';
+    }
+  };
+
+  recognition.onend = () => {
+    isRecording = false;
+    voiceBtn.textContent = '[ ◉ HOLD TO SPEAK ]';
+    voiceBtn.style.borderColor = '';
+    voiceBtn.style.color = '';
+    const text = document.getElementById('cmdInput').value.trim();
+    if (text) {
+      voiceStatus.textContent = 'executing...';
+      executeCommand();
+    }
+  };
+
+  recognition.onerror = (e) => {
+    isRecording = false;
+    voiceBtn.textContent = '[ ◉ HOLD TO SPEAK ]';
+    voiceBtn.style.borderColor = '';
+    voiceBtn.style.color = '';
+    voiceStatus.textContent = 'error: ' + e.error;
+    voiceStatus.style.color = 'var(--red)';
+  };
+}
+
+voiceBtn.addEventListener('mousedown', () => {
+  if (!recognition) return;
+  if (!isRecording) recognition.start();
+});
+
+voiceBtn.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  if (!recognition) return;
+  if (!isRecording) recognition.start();
+});
+
+voiceBtn.addEventListener('mouseup', () => {
+  if (recognition && isRecording) recognition.stop();
+});
+
+voiceBtn.addEventListener('touchend', () => {
+  if (recognition && isRecording) recognition.stop();
+});
+
+// ============================================================
+//  INIT
+// ============================================================
+
+window.addEventListener('resize', () => { resizeCanvas(); });
+resizeCanvas();
+requestAnimationFrame(render);
+initVoice();
+
+log('arm initialized — 3-DOF geometric IK', 'ok');
+log('workspace radius: 1.0m', 'muted');
+log('awaiting command...', 'muted');
+</script>
+</body>
+</html>
