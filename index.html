@@ -1042,56 +1042,92 @@ If the command is unclear or impossible, respond with:
 
 async function callAI(userText) {
   const apiKey = document.getElementById('apiKey').value.trim();
+
   if (!apiKey) {
     setStatus('NO API KEY', 'error');
     log('paste your Gemini API key above', 'error');
     return null;
   }
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+  // Updated Gemini endpoint
+  const url =
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
+  // Prompt body
   const body = {
-    system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
-    contents: [{ role: 'user', parts: [{ text: userText }] }]
+    contents: [
+      {
+        role: "user",
+        parts: [
+          {
+            text:
+              SYSTEM_PROMPT +
+              "\n\nUser command: " +
+              userText
+          }
+        ]
+      }
+    ]
   };
 
   setStatus('CALLING AI...', 'warn');
-  log(`parsing: "${userText.slice(0, 50)}${userText.length > 50 ? '…' : ''}"`, 'muted');
+
+  log(
+    `parsing: "${userText.slice(0, 50)}${userText.length > 50 ? '…' : ''}"`,
+    'muted'
+  );
 
   try {
     const resp = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify(body)
     });
 
+    const data = await resp.json();
+
+    console.log("Gemini response:", data);
+
     if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      const msg = err?.error?.message || `HTTP ${resp.status}`;
+      const msg = data?.error?.message || `HTTP ${resp.status}`;
       setStatus('API ERROR', 'error');
       log(msg, 'error');
       return null;
     }
 
-    const data = await resp.json();
-    const raw  = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-    const clean = raw.replace(/```json|```/gi, '').trim();
+    const raw =
+      data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+
+    if (!raw) {
+      setStatus('EMPTY RESPONSE', 'error');
+      log('Gemini returned empty output', 'error');
+      return null;
+    }
+
+    const clean = raw
+      .replace(/```json/gi, '')
+      .replace(/```/g, '')
+      .trim();
+
+    console.log("Clean JSON:", clean);
 
     try {
       return JSON.parse(clean);
-    } catch {
+    } catch (err) {
       setStatus('PARSE ERROR', 'error');
-      log(`bad response: ${raw.slice(0, 60)}`, 'error');
+      log(`bad JSON: ${clean}`, 'error');
       return null;
     }
 
   } catch (e) {
+    console.error(e);
     setStatus('NETWORK ERROR', 'error');
-    log('check API key and connection', 'error');
+    log(e.message || 'network failure', 'error');
     return null;
   }
 }
-
 async function executeCommand() {
   const text = document.getElementById('cmdInput').value.trim();
   if (!text) return;
