@@ -5,7 +5,7 @@ ARM CTRL is a sophisticated, browser-based simulation of a 3-DOF (Degree of Free
 
 ---
 
-## 🚀 Key Features
+##  Key Features
 
 - **Natural Language Control:** Powered by Gemini AI, translate plain English commands like "reach overhead" or "grab the box at waist height" into precise 3D coordinates.
 - **Voice Recognition:** Hands-free operation using the Web Speech API. Hold to speak, and watch the arm respond.
@@ -19,7 +19,7 @@ ARM CTRL is a sophisticated, browser-based simulation of a 3-DOF (Degree of Free
 
 ---
 
-## 🛠️ Technical Specifications
+##  Technical Specifications
 
 - **Kinematics:** 3 revolute joints (Z-Y-Y configuration).
 - **Link Geometry:** L1=0.4m (Base to Shoulder), L2=0.35m (Shoulder to Elbow), L3=0.25m (Elbow to End-Effector).
@@ -28,7 +28,7 @@ ARM CTRL is a sophisticated, browser-based simulation of a 3-DOF (Degree of Free
 
 ---
 
-## 📖 How to Use
+##  How to Use
 
 ### 1. Setup
 - Open `index.html` in a modern web browser (Chrome is recommended for Voice Input support).
@@ -54,7 +54,7 @@ ARM CTRL is a sophisticated, browser-based simulation of a 3-DOF (Degree of Free
 
 ---
 
-## 📝 Example Commands
+##  Example Commands
 
 - *"Reach forward half a meter at waist height."*
 - *"Extend fully upward."*
@@ -64,11 +64,11 @@ ARM CTRL is a sophisticated, browser-based simulation of a 3-DOF (Degree of Free
 
 ---
 
-## 📂 Project Structure
+##  Project Structure
 
 - `index.html`: The core application containing the UI, Styles, Kinematics Solver, and AI Integration.
 - `README.md`: Documentation and usage guide.
 
 ---
 
-*Built for the Activate VC Fellows challenge.*
+*Built for the Activate VC AI Fellows challenge.*
